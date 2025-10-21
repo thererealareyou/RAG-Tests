@@ -1,182 +1,287 @@
+import re
+from typing import List, Dict, Any, Tuple
+
 import chromadb
 import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, T5EncoderModel
+import torch.nn.functional as f
+import numpy as np
 from rank_bm25 import BM25Okapi
-import re
+from transformers import AutoTokenizer, T5EncoderModel
 
-from src.inference import SarcasmPhilosopherInferencer
+from src.inference import ROWInferencer
 
 
 def pool(hidden_state, mask, pooling_method="cls"):
+    """
+    Пуллинг скрытых состояний.
+    """
     if pooling_method == "mean":
         s = torch.sum(hidden_state * mask.unsqueeze(-1).float(), dim=1)
         d = mask.sum(axis=1, keepdim=True).float()
         return s / d
     elif pooling_method == "cls":
         return hidden_state[:, 0]
+    else:
+        raise ValueError(f"Unknown pooling method: {pooling_method}")
 
-# === 1. Загружаем модель для эмбеддингов ===
-tokenizer_emb = AutoTokenizer.from_pretrained("ai-forever/FRIDA", local_files_only=True)
-model_emb = T5EncoderModel.from_pretrained("ai-forever/FRIDA", local_files_only=True)
 
-def get_embedding(text):
-    tokenized = tokenizer_emb(text, max_length=512, padding=True, truncation=True, return_tensors="pt")
+def get_embedding(text: str, tokenizer, model) -> np.ndarray:
+    """
+    Генерирует эмбеддинг для текста с помощью заданной модели.
+    """
+    tokenized = tokenizer(
+        text,
+        max_length=512,
+        padding=True,
+        truncation=True,
+        return_tensors="pt",
+    )
     with torch.no_grad():
-        outputs = model_emb(**tokenized)
-    embeddings = pool(outputs.last_hidden_state, tokenized["attention_mask"], pooling_method="cls")
-    embeddings = F.normalize(embeddings, p=2, dim=1)
+        outputs = model(**tokenized)
+
+    embeddings = pool(
+        outputs.last_hidden_state,
+        tokenized["attention_mask"],
+        pooling_method="cls",
+    )
+    embeddings = f.normalize(embeddings, p=2, dim=1)
     return embeddings.cpu().numpy()
 
-def preprocess_text(text):
-    """Простая предобработка текста для BM25: приведение к нижнему регистру и токенизация по пробелам."""
-    tokens = re.findall(r'\w+', text.lower())
+
+def preprocess_text(text: str) -> List[str]:
+    """
+    Простая предобработка текста для BM25.
+    """
+    tokens = re.findall(r"\w+", text.lower())
     return tokens
 
-# === 2. Подключаемся к векторной базе ===
-client = chromadb.PersistentClient(path="src/data")
-collection = client.get_collection("outer_wilds_wiki")
 
-# === 2.1. Загружаем все документы и их ID из базы для BM25 ===
-all_docs_result = collection.get(include=['documents', 'metadatas'])
-corpus = all_docs_result['documents']
-doc_metadatas = all_docs_result.get('metadatas', [{}] * len(corpus))
-doc_ids_from_get = all_docs_result['ids']
-print(f"Загружено {len(corpus)} документов для BM25 из базы Chroma.")
+def initialize_embedding_model(model_name: str) -> Tuple[AutoTokenizer, T5EncoderModel]:
+    """
+    Загружает токенизатор и модель для эмбеддингов.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, local_files_only=True
+    )
+    model = T5EncoderModel.from_pretrained(
+        model_name, local_files_only=True
+    )
+    return tokenizer, model
 
-# === 2.2. Создаём индекс BM25 на основе загруженного корпуса ===
-tokenized_corpus = [preprocess_text(doc) for doc in corpus]
-print(f"Создан индекс BM25 для {len(tokenized_corpus)} документов.")
-# Отладка: посмотрим первые токенизированные документы
-# print("Примеры токенизированных документов:", tokenized_corpus[:2])
 
-bm25 = BM25Okapi(tokenized_corpus)
+def load_chroma_collection(
+    path: str, collection_name: str
+) -> Tuple[List[str], List[Dict], List[str]]:
+    """
+    Подключается к Chroma, загружает документы, метаданные и ID.
+    """
+    client = chromadb.PersistentClient(path=path)
+    collection = client.get_collection(collection_name)
+    all_docs_result = collection.get(include=["documents", "metadatas"])
+    corpus = all_docs_result["documents"]
+    doc_metadatas = all_docs_result.get("metadatas", [{}] * len(corpus))
+    doc_ids = all_docs_result["ids"]
+    return corpus, doc_metadatas, doc_ids
 
-# === 3. Тестовый запрос ===
-query = "Кто такой удильщик?"  #  Запрос
-print(f"Запрос: '{query}'")
 
-# === 4. Лексический поиск (BM25) ===
-tokenized_query = preprocess_text(query)
-print(f"Токенизированный запрос: {tokenized_query}")
+def create_bm25_index(corpus: List[str]) -> BM25Okapi:
+    """
+    Создаёт индекс BM25 на основе корпуса.
+    """
+    tokenized_corpus = [preprocess_text(doc) for doc in corpus]
+    return BM25Okapi(tokenized_corpus)
 
-bm25_scores = bm25.get_scores(tokenized_query)
-print(f"Получено {len(bm25_scores)} оценок BM25 (должно совпадать с количеством документов).")
 
-# === 4.1. Получаем топ-N результатов из BM25 ===
-N_BM25 = 10
-top_n_indices_bm25 = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:N_BM25]
-top_n_docs_bm25 = [corpus[i] for i in top_n_indices_bm25]
-top_n_ids_bm25 = [doc_ids_from_get[i] for i in top_n_indices_bm25]
-top_n_scores_bm25 = [bm25_scores[i] for i in top_n_indices_bm25]
+def lexical_search(
+    query: str, bm25: BM25Okapi, corpus: List[str], doc_ids: List[str], n: int
+) -> List[Dict[str, Any]]:
+    """
+    Выполняет лексический поиск (BM25).
+    """
+    tokenized_query = preprocess_text(query)
+    bm25_scores = bm25.get_scores(tokenized_query)
+    top_n_indices = sorted(
+        range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
+    )[:n]
 
-print(f"Топ-{N_BM25} документов по BM25:")
-for i, (idx, score) in enumerate(zip(top_n_indices_bm25, top_n_scores_bm25)):
-    print(f"  {i+1}. ID: {top_n_ids_bm25[i]}, Score: {score:.4f}, Doc: '{top_n_docs_bm25[i][:100]}...'") # Печатаем первые 100 символов
+    results = []
+    for i in top_n_indices:
+        results.append({
+            "id": doc_ids[i],
+            "document": corpus[i],
+            "score": bm25_scores[i],
+        })
+    return results
 
-# === 5. Получаем эмбеддинг запроса ===
-query_embedding = get_embedding(query)
 
-# === 6. Выполняем семантический (векторный) поиск ===
-N_VECTOR = 10
-vector_results = collection.query(
-    query_embeddings=query_embedding,
-    n_results=N_VECTOR
-)
+def semantic_search(
+    query_embedding: np.ndarray,
+    collection,
+    n: int
+) -> List[Dict[str, Any]]:
+    """
+    Выполняет семантический (векторный) поиск.
+    """
+    vector_results = collection.query(
+        query_embeddings=query_embedding, n_results=n
+    )
 
-# === 6.1. Извлекаем результаты векторного поиска ===
-vector_docs = vector_results['documents'][0]
-vector_doc_ids = vector_results['ids'][0]
-vector_distances = vector_results['distances'][0]
-vector_scores = [1 - d for d in vector_distances]
+    vector_docs = vector_results["documents"][0]
+    vector_doc_ids = vector_results["ids"][0]
+    vector_distances = vector_results["distances"][0]
+    vector_scores = [1 - d for d in vector_distances]
 
-print(f"Топ-{N_VECTOR} документов по векторному поиску:")
-for i, (doc_id, v_score, dist) in enumerate(zip(vector_doc_ids, vector_scores, vector_distances)):
-    print(f"  {i+1}. ID: {doc_id}, Vector Score: {v_score:.4f}, Distance: {dist:.4f}, Doc: '{vector_docs[i][:100]}...'") # Печатаем первые 100 символов
+    results = []
+    for doc_id, doc_text, v_score, dist in zip(
+        vector_doc_ids, vector_docs, vector_scores, vector_distances
+    ):
+        results.append({
+            "id": doc_id,
+            "document": doc_text,
+            "score": v_score,
+            "distance": dist,
+        })
+    return results
 
-# === 7. Объединение результатов ===
-combined_results = {}
 
-# Добавляем результаты векторного поиска
-print("\n--- Добавляем результаты векторного поиска ---")
-for doc_text, doc_id, v_score in zip(vector_docs, vector_doc_ids, vector_scores):
-    print(f"  Обрабатываю векторный результат: ID={doc_id}, Vector Score={v_score:.4f}")
-    if doc_id in combined_results:
-        combined_results[doc_id]['vector_score'] = max(v_score, combined_results[doc_id]['vector_score'])
-        print(f"    Обновлён векторный скор для ID {doc_id}")
-    else:
-        # Нужно найти BM25 оценку для этого документа
-        # Найдём индекс документа в corpus по его ID
-        try:
-            doc_idx_in_corpus = doc_ids_from_get.index(doc_id)
-            print(f"    Найден индекс в корпусе: {doc_idx_in_corpus}")
-            # Получим оценку BM25 для этого индекса
-            b_score = bm25_scores[doc_idx_in_corpus]
-            print(f"    BM25 Score для этого документа: {b_score:.4f}")
-        except ValueError:
-            print(f"    ОШИБКА: ID {doc_id} из векторного поиска не найден в списке ID из collection.get()!")
-            b_score = 0.0 # Если ID не найден, присваиваем 0
+def combine_search_results(
+    vector_results: List[Dict[str, Any]],
+    bm25_results: List[Dict[str, Any]],
+    doc_ids_from_get: List[str],
+    bm25_scores_full: List[float],
+) -> List[Dict[str, Any]]:
+    """
+    Объединяет результаты векторного и BM25 поиска.
+    """
+    combined_results = {}
 
-        combined_results[doc_id] = {
-            'document': doc_text,
-            'vector_score': v_score,
-            'bm25_score': b_score,
-        }
-        print(f"    Добавлен документ в combined_results с BM25 Score: {b_score:.4f}")
+    for item in vector_results:
+        doc_id = item["id"]
+        doc_text = item["document"]
+        v_score = item["score"]
 
-# Добавляем результаты BM25 (только если их нет в векторном поиске)
-print("\n--- Добавляем результаты BM25 (если ID не в векторном поиске) ---")
-for doc_text, doc_id, b_score in zip(top_n_docs_bm25, top_n_ids_bm25, top_n_scores_bm25):
-    print(f"  Обрабатываю BM25 результат: ID={doc_id}, BM25 Score={b_score:.4f}")
-    if doc_id in combined_results:
-        # Обновляем BM25 score, если он выше
-        if b_score > combined_results[doc_id]['bm25_score']:
-             combined_results[doc_id]['bm25_score'] = b_score
-             print(f"    Обновлён BM25 скор для ID {doc_id} до {b_score:.4f}")
+        if doc_id in combined_results:
+            existing = combined_results[doc_id]
+            existing["vector_score"] = max(v_score, existing["vector_score"])
         else:
-             print(f"    BM25 скор ({b_score:.4f}) не выше существующего ({combined_results[doc_id]['bm25_score']:.4f}) для ID {doc_id}")
-    else:
-        print(f"    Добавлен новый документ из BM25 в combined_results")
-        combined_results[doc_id] = {
-            'document': doc_text,
-            'vector_score': 0.0,
-            'bm25_score': b_score,
-        }
+            try:
+                doc_idx_in_corpus = doc_ids_from_get.index(doc_id)
+                b_score = bm25_scores_full[doc_idx_in_corpus]
+            except ValueError:
+                b_score = 0.0
 
-# === 8. Ранжирование объединённых результатов ===
-WEIGHT_VECTOR = 0.4
-WEIGHT_BM25 = 0.6
+            combined_results[doc_id] = {
+                "document": doc_text,
+                "vector_score": v_score,
+                "bm25_score": b_score,
+            }
 
-def calculate_hybrid_score(result):
-    v_score = result['vector_score']
-    b_score = result['bm25_score']
-    return WEIGHT_VECTOR * v_score + WEIGHT_BM25 * b_score
+    for item in bm25_results:
+        doc_id = item["id"]
+        doc_text = item["document"]
+        b_score = item["score"]
 
-sorted_results_with_id = sorted(combined_results.items(), key=lambda item: calculate_hybrid_score(item[1]), reverse=True)
+        if doc_id in combined_results:
+            existing = combined_results[doc_id]
+            existing["bm25_score"] = max(b_score, existing["bm25_score"])
+        else:
+            combined_results[doc_id] = {
+                "document": doc_text,
+                "vector_score": 0.0,
+                "bm25_score": b_score,
+            }
 
-# === 9. Выбираем топ-K финальных результатов ===
-K_FINAL = 10
-final_results_data = [item[1] for item in sorted_results_with_id[:K_FINAL]]
-final_docs = [res['document'] for res in final_results_data]
+    return list(combined_results.values())
 
-print("\n🔍 Найденные документы (гибридный поиск):")
-for i, (doc_id, res_data) in enumerate(sorted_results_with_id[:K_FINAL]):
-    score = calculate_hybrid_score(res_data)
-    print(f"Doc {i+1} (ID: {doc_id}): Score={score:.4f}, Vector={res_data['vector_score']:.4f}, BM25={res_data['bm25_score']:.4f}")
-    print(f"Text: {res_data['document']}")
-    print("-" * 50)
 
-# === 10. Формируем промпт для LLM ===
-context = "\n".join(final_docs)
+def calculate_hybrid_score(
+    result: Dict[str, float], w_vector: float = 0.4, w_bm25: float = 0.6
+) -> float:
+    """
+    Рассчитывает гибридный скор.
+    """
+    v_score = result["vector_score"]
+    b_score = result["bm25_score"]
+    return w_vector * v_score + w_bm25 * b_score
 
-prompt = f"""
-Контекст: {context}
 
-Вопрос: {query}
+def rank_and_filter_results(
+    combined_results: List[Dict[str, Any]], k: int
+) -> List[Dict[str, Any]]:
+    """
+    Ранжирует объединённые результаты и возвращает топ-K.
+    """
+    sorted_results = sorted(
+        combined_results,
+        key=lambda x: calculate_hybrid_score(x),
+        reverse=True,
+    )
+    return sorted_results[:k]
 
-Ответ:
-"""
 
-SPI = SarcasmPhilosopherInferencer()
-answer = SPI.generate_response(user_prompt=prompt)
-print(answer['response'])
+def build_prompt(context: str, query: str) -> str:
+    """
+    Формирует промпт для LLM.
+    """
+    return f"Контекст: {context}\n\nВопрос: {query}\n\nОтвет:"
+
+
+def main():
+    """
+    Основная функция для выполнения гибридного поиска и генерации ответа.
+    """
+    # Параметры
+    EMBEDDING_MODEL_NAME = "ai-forever/FRIDA"
+    CHROMA_PATH = "src/data"
+    COLLECTION_NAME = "outer_wilds_wiki"
+    N_BM25 = 10
+    N_VECTOR = 10
+    K_FINAL = 10
+    QUERY = "Расскажи концовку Outer Wilds"
+
+    # 1. Инициализация модели эмбеддингов
+    tokenizer_emb, model_emb = initialize_embedding_model(EMBEDDING_MODEL_NAME)
+
+    # 2. Загрузка коллекции из Chroma
+    corpus, doc_metadatas, doc_ids_from_get = load_chroma_collection(
+        CHROMA_PATH, COLLECTION_NAME
+    )
+
+    # 3. Создание индекса BM25
+    bm25 = create_bm25_index(corpus)
+
+    # 4. Лексический поиск (BM25)
+    bm25_results = lexical_search(
+        QUERY, bm25, corpus, doc_ids_from_get, N_BM25
+    )
+
+    # 5. Семантический поиск
+    query_embedding = get_embedding(QUERY, tokenizer_emb, model_emb)
+    # Необходимо получить объект collection снова для семантического поиска
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    collection = client.get_collection(COLLECTION_NAME)
+    vector_results = semantic_search(query_embedding, collection, N_VECTOR)
+
+    # 6. Объединение результатов
+    # Для корректного объединения нужен полный список bm25_scores
+    tokenized_query_full = preprocess_text(QUERY)
+    full_bm25_scores = bm25.get_scores(tokenized_query_full)
+    combined_results = combine_search_results(
+        vector_results, bm25_results, doc_ids_from_get, full_bm25_scores
+    )
+
+    # 7. Ранжирование и фильтрация
+    ranked_results = rank_and_filter_results(combined_results, K_FINAL)
+
+    # 8. Формирование контекста и промпта
+    context = "\n".join([res["document"] for res in ranked_results])
+    prompt = build_prompt(context, QUERY)
+
+    # 9. Генерация ответа
+    spi = SarcasmPhilosopherInferencer()
+    answer = spi.generate_response(user_prompt=prompt)
+    print(answer["response"])
+
+
+if __name__ == "__main__":
+    main()
