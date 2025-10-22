@@ -516,16 +516,39 @@ def delete_page_and_chunks(page_id: int, delete_original: bool = False, db_path:
         conn.close()
 
 
+def form_chunks(content: str) -> List[str]:
+    """
+    Формирует чанки. Разделение осуществляется по точкам и ограничению длины полученных предложений.
+
+    Args:
+        content (str): Содержимое страницы.
+
+    Returns:
+        List[str]: Список полученных предложений.
+    """
+    total_chunks = []
+    current_chunk = ''
+    length_of_current_chunk = 0
+    splitted_content = content.split('.')
+    for chunk in splitted_content:
+        if length_of_current_chunk + len(chunk) < 768:
+            current_chunk = current_chunk + chunk
+            length_of_current_chunk += len(chunk)
+        else:
+            total_chunks.append(current_chunk)
+            current_chunk = ''
+            length_of_current_chunk = 0
+
+    return total_chunks
+
+
 def example_usage():
     data = get_all_pages()
-    content = [row[2] for row in data]
-    print(content[10])
-    print(content[10].split('[ ]'))
-    print(len(content[10].split('[ ]')))
-    chunks = [row.split('[ ]') for row in content]
-
-    print(len(chunks))
-
+    ids = [row[0] for row in data]
+    for page_id in ids:
+        _, url, unchunked_content = get_page_by_id(page_id)
+        chunked_content = form_chunks(unchunked_content)
+        save_chunks_to_db(page_id, chunked_content)
 
 if __name__ == "__main__":
     example_usage()
