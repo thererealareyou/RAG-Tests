@@ -230,7 +230,7 @@ def main():
     """
     Основная функция для выполнения гибридного поиска и генерации ответа.
     """
-    # Параметры
+
     EMBEDDING_MODEL_NAME = "ai-forever/FRIDA"
     CHROMA_PATH = "src/data"
     COLLECTION_NAME = "outer_wilds_wiki"
@@ -278,7 +278,7 @@ def main():
     prompt = build_prompt(context, QUERY)
 
     # 9. Генерация ответа
-    spi = SarcasmPhilosopherInferencer()
+    spi = ROWInferencer()
     answer = spi.generate_response(user_prompt=prompt)
     print(answer["response"])
 
