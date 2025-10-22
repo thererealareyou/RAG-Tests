@@ -1,12 +1,14 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 
+from src.parser import log_execution
 
 class ROWInferencer:
     def __init__(
         self,
-        base_model_name: str = "Qwen/Qwen3-1.7B",
-        device: str = "auto",
+        base_model_name: str = "t-tech/T-lite-it-1.0",
+        # base_model_name: str = "Qwen/Qwen3-1.7B",
+        device: str = "cuda",
     ):
         self.tokenizer = AutoTokenizer.from_pretrained(
             base_model_name,
@@ -25,11 +27,12 @@ class ROWInferencer:
         )
         self.model.eval()
 
+    @log_execution
     def generate_response(
         self,
         system_prompt: str,
         user_prompt: str,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 1024,
     ):
         messages = [
             {"role": "system", "content": system_prompt},
@@ -52,7 +55,7 @@ class ROWInferencer:
                 **model_inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
-                temperature=0.2,
+                temperature=0.1,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
 

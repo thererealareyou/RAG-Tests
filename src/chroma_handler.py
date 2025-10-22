@@ -1,6 +1,41 @@
 import chromadb
+import numpy as np
+from typing import List, Tuple, Dict
 
-def remove_duplicate_documents(client_path, collection_name):
+
+def create_vector(embeddings: List[np.ndarray], chunks: List[str], overwrite_collection: bool = False):
+    """
+    Создаёт или пересоздаёт векторную базу данных ChromaDB.
+
+    Args:
+        embeddings (List[np.ndarray]): Список эмбеддингов для чанков.
+        chunks (List[str]): Список текстовых чанков.
+        overwrite_collection (bool): Если True, удалит существующую коллекцию перед созданием новой.
+                                     Если False и коллекция существует, будет ошибка или поведение ChromaDB по умолчанию.
+    """
+    client = chromadb.PersistentClient(path="./data")
+    collection_name = 'outer_wilds_wiki'
+
+    if overwrite_collection:
+        existing_collections = [col.name for col in client.list_collections()]
+        if collection_name in existing_collections:
+            print(f"Коллекция '{collection_name}' существует. Удаляем её...")
+            client.delete_collection(collection_name)
+            print(f"Коллекция '{collection_name}' удалена.")
+        else:
+            print(f"Коллекция '{collection_name}' не существует, создаём новую.")
+
+    collection = client.create_collection(collection_name)
+
+    collection.add(
+        embeddings=embeddings,
+        documents=chunks,
+        ids=[f"{i}" for i in range(len(chunks))]
+    )
+    print(f"Коллекция '{collection_name}' успешно создана с {len(chunks)} элементами.")
+
+
+def remove_duplicate(client_path, collection_name):
     """
     Удаляет дубликаты из коллекции ChromaDB на основе содержимого документов (documents).
 
@@ -61,13 +96,16 @@ def remove_duplicate_documents(client_path, collection_name):
     print(f"После удаления в коллекции {len(remaining_data['ids'])} записей.")
 
 
-# --- Пример использования ---
-if __name__ == "__main__":
-    CLIENT_PATH = "C://Users//thererealareyou\PycharmProjects\LLMPhilosophy\src\data"  # Укажите ваш путь к базе данных
-    COLLECTION_NAME = "outer_wilds_wiki" # Укажите имя вашей коллекции
-
-    # Запускаем функцию удаления дубликатов
-    remove_duplicate_documents(
-        client_path=CLIENT_PATH,
-        collection_name=COLLECTION_NAME
-    )
+def load_collection(
+    path: str, collection_name: str
+) -> Tuple[List[str], List[Dict], List[str]]:
+    """
+    Подключается к Chroma, загружает документы, метаданные и ID.
+    """
+    client = chromadb.PersistentClient(path=path)
+    collection = client.get_collection(collection_name)
+    all_docs_result = collection.get(include=["documents", "metadatas"])
+    corpus = all_docs_result["documents"]
+    doc_metadatas = all_docs_result.get("metadatas", [{}] * len(corpus))
+    doc_ids = all_docs_result["ids"]
+    return corpus, doc_metadatas, doc_ids

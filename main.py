@@ -1,4 +1,5 @@
 import re
+from tqdm import tqdm
 from typing import List, Dict, Any, Tuple
 
 import chromadb
@@ -9,6 +10,9 @@ from rank_bm25 import BM25Okapi
 from transformers import AutoTokenizer, T5EncoderModel
 
 from src.inference import ROWInferencer
+from src.parser import *
+import src.chroma_handler
+from src.sqlite_handler import *
 
 
 def pool(hidden_state, mask, pooling_method="cls"):
@@ -67,21 +71,6 @@ def initialize_embedding_model(model_name: str) -> Tuple[AutoTokenizer, T5Encode
         model_name, local_files_only=True
     )
     return tokenizer, model
-
-
-def load_chroma_collection(
-    path: str, collection_name: str
-) -> Tuple[List[str], List[Dict], List[str]]:
-    """
-    Подключается к Chroma, загружает документы, метаданные и ID.
-    """
-    client = chromadb.PersistentClient(path=path)
-    collection = client.get_collection(collection_name)
-    all_docs_result = collection.get(include=["documents", "metadatas"])
-    corpus = all_docs_result["documents"]
-    doc_metadatas = all_docs_result.get("metadatas", [{}] * len(corpus))
-    doc_ids = all_docs_result["ids"]
-    return corpus, doc_metadatas, doc_ids
 
 
 def create_bm25_index(corpus: List[str]) -> BM25Okapi:
@@ -237,13 +226,15 @@ def main():
     N_BM25 = 10
     N_VECTOR = 10
     K_FINAL = 10
-    QUERY = "Расскажи концовку Outer Wilds"
+    QUERY = "Что находится внутри Пучины Гиганта?"
+
+    system_prompt = "Ты - помощник по игре Outer Wilds. Опираясь на данные документы, ответь кратко и информативно на вопрос пользователя. В случае, если информации недостаточно, отвечай 'Я не знаю'."
 
     # 1. Инициализация модели эмбеддингов
     tokenizer_emb, model_emb = initialize_embedding_model(EMBEDDING_MODEL_NAME)
 
     # 2. Загрузка коллекции из Chroma
-    corpus, doc_metadatas, doc_ids_from_get = load_chroma_collection(
+    corpus, doc_metadatas, doc_ids_from_get = src.chroma_handler.load_collection(
         CHROMA_PATH, COLLECTION_NAME
     )
 
@@ -270,6 +261,9 @@ def main():
         vector_results, bm25_results, doc_ids_from_get, full_bm25_scores
     )
 
+    for doc in combined_results:
+        print(doc)
+
     # 7. Ранжирование и фильтрация
     ranked_results = rank_and_filter_results(combined_results, K_FINAL)
 
@@ -279,9 +273,18 @@ def main():
 
     # 9. Генерация ответа
     spi = ROWInferencer()
-    answer = spi.generate_response(user_prompt=prompt)
+    answer = spi.generate_response(user_prompt=prompt, system_prompt=system_prompt)
     print(answer["response"])
 
 
 if __name__ == "__main__":
     main()
+    '''tokenizer_emb, model_emb = initialize_embedding_model("ai-forever/FRIDA")
+    chunks = get_all_chunks("src/data/wiki_content.db")
+    embeddings = []
+    chunk_texts = []
+    for chunk in tqdm(chunks):
+        embeddings.append(get_embedding(chunk[2], tokenizer_emb, model_emb).squeeze())
+        chunk_texts.append(chunk[2])
+
+    src.chroma_handler.create_vector(embeddings, chunk_texts, overwrite_collection=True)'''
