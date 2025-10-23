@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from typing import List, Tuple, Optional
 
@@ -277,18 +278,33 @@ def delete_page_and_chunks(page_id: int, delete_original: bool = False, db_path:
         conn.close()
 
 
-def form_chunks(content: str) -> List[str]:
+def clear_db(db_path: str = "data/wiki_content.db", clear_pages: bool = False):
+    """
+    Очищает базу данных с чанками
+
+    Args:
+        db_path (str): Путь до базы данных,
+        clear_pages (bool): Очистить ли базу данных со страницами.
+    """
+
+    pages = get_all_pages(db_path)
+    for page in pages:
+        delete_page_and_chunks(page[0], delete_original=clear_pages)
+
+
+def form_chunks(title: str, content: str) -> List[str]:
     """
     Формирует чанки. Разделение осуществляется по точкам и ограничению длины полученных предложений.
 
     Args:
+        title (str): Оглавление страницы,
         content (str): Содержимое страницы.
 
     Returns:
         List[str]: Список полученных предложений.
     """
     total_chunks = []
-    current_chunk = ''
+    current_chunk = 'search_document: ' + title + ' '
     length_of_current_chunk = 0
     splitted_content = content.split('.')
     for chunk in splitted_content:
@@ -297,8 +313,54 @@ def form_chunks(content: str) -> List[str]:
             length_of_current_chunk += len(chunk)
         else:
             total_chunks.append(current_chunk)
-            current_chunk = ''
+            current_chunk = 'search_document: ' + title + ' '
             length_of_current_chunk = 0
 
-    return total_chunks
+    return total_chunks if len(total_chunks) > 0 else [current_chunk]
 
+
+def remove_alpha_pages(db_path: str = "data/wiki_content.db"):
+    """
+    Удаляет все страницы, в названии которых фигурирует (Альфа)
+    """
+    pages = get_all_pages(db_path)
+    for page in pages:
+        text = page[2]
+        text = text[:text.find('\n')]
+        if '(Альфа)' in text:
+            delete_page_and_chunks(page[0], delete_original=True)
+
+
+def clean_text(content: str) -> str:
+    """
+    Очищает текст от ненужных данных
+
+    Args:
+        content (str): Изначальный текст.
+
+    Returns:
+        str: Изменённый текст
+    """
+
+    text = content
+    text = (text.replace('\n', ' ')
+            .replace(' ↑ ', '')
+            .replace('ВНИМАНИЕ, СПОЙЛЕРЫ : Статья содержит детали сюжета игры Outer Wilds', '')
+            .replace('ВНИМАНИЕ, СПОЙЛЕРЫ : Статья содержит детали сюжета дополнения Echoes of the Eye', '')
+            .replace(' ,', ',')
+            .replace(' .', '.')
+            .replace('Заголовок: ', ''))
+    if 'Содержание 1' in text:
+        desc = text[text.find('Содержание 1'):text.find('[ ]')]
+        text = text.replace(desc, '')
+
+    link_pattern = re.compile(
+        r'https?://[^\s]+|'
+        r'www\.[^\s]+|'
+        r'[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*'
+    )
+    text = link_pattern.sub('', text)
+
+    square_bracket_pattern = r'\[[^\]]*\]'
+    text = re.sub(square_bracket_pattern, '', text)
+    return text

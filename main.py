@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, T5EncoderModel
 from src.inference import ROWInferencer
 from src.parser import *
 import src.chroma_handler
-from src.sqlite_handler import *
+import src.sqlite_handler
 
 
 def pool(hidden_state, mask, pooling_method="cls"):
@@ -278,8 +278,19 @@ def main():
 
 
 if __name__ == "__main__":
+    pages = src.sqlite_handler.get_all_pages("src/data/wiki_content.db")[6:]
+    src.sqlite_handler.clear_db("src/data/wiki_content.db")
+    for page in pages:
+        cleaned_text = src.sqlite_handler.clean_text(page[2])
+        src.sqlite_handler.remove_alpha_pages("src/data/wiki_content.db")
+        chunks = src.sqlite_handler.form_chunks(title=cleaned_text[:cleaned_text.find('  Содержимое: ')],
+                                                content=cleaned_text[cleaned_text.find('  Содержимое: ') + 14:])
+        src.sqlite_handler.save_chunks(page[0], chunks, "src/data/wiki_content.db")
+
+    '''
     main()
-    '''tokenizer_emb, model_emb = initialize_embedding_model("ai-forever/FRIDA")
+    
+    tokenizer_emb, model_emb = initialize_embedding_model("ai-forever/FRIDA")
     chunks = get_all_chunks("src/data/wiki_content.db")
     embeddings = []
     chunk_texts = []
@@ -287,4 +298,5 @@ if __name__ == "__main__":
         embeddings.append(get_embedding(chunk[2], tokenizer_emb, model_emb).squeeze())
         chunk_texts.append(chunk[2])
 
-    src.chroma_handler.create_vector(embeddings, chunk_texts, overwrite_collection=True)'''
+    src.chroma_handler.create_vector(embeddings, chunk_texts, overwrite_collection=True)
+    '''

@@ -3,6 +3,7 @@ import torch
 
 from src.parser import log_execution
 
+
 class ROWInferencer:
     def __init__(
         self,
